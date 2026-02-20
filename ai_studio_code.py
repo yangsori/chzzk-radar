@@ -14,8 +14,8 @@ if not CLIENT_ID or not CLIENT_SECRET:
     exit(1)
 
 headers = {
-    "Client-Id": CLIENT_ID,
-    "Client-Secret": CLIENT_SECRET,
+    "X-CHZZK-CLIENT-ID": CLIENT_ID,
+    "X-CHZZK-CLIENT-SECRET": CLIENT_SECRET,
     "Content-Type": "application/json"
 }
 
