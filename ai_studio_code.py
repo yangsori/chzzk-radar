@@ -14,8 +14,8 @@ if not CLIENT_ID or not CLIENT_SECRET:
     exit(1)
 
 headers = {
-    "X-CHZZK-CLIENT-ID": CLIENT_ID,
-    "X-CHZZK-CLIENT-SECRET": CLIENT_SECRET,
+    "Client-Id": CLIENT_ID,
+    "Client-Secret": CLIENT_SECRET,
     "Content-Type": "application/json"
 }
 
@@ -46,7 +46,7 @@ def scan_live_streamers(conn):
     cursor = conn.cursor()
     print("📡 치지직 레이더 스캔을 시작합니다...")
 
-    url = "https://openapi.chzzk.naver.com/open/v1/lives?size=50"
+    url = "https://openapi.chzzk.naver.com/open/v1/lives?size=20"
     response = requests.get(url, headers=headers)
     
     if response.status_code != 200:
