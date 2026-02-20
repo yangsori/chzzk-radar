@@ -40,7 +40,7 @@ def setup_database():
     return conn
 
 # ==========================================
-# 3. 레이더 스캔 실행 (커서 기반 전체 수집)
+# 3. 레이더 스캔 실행 (문자열 커서 기반 전체 수집)
 # ==========================================
 def scan_live_streamers(conn):
     cursor_db = conn.cursor()
@@ -51,8 +51,7 @@ def scan_live_streamers(conn):
     current_time = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
     
     # 다음 페이지를 열기 위한 커서 초기화
-    next_concurrent_user_count = None
-    next_live_id = None
+    next_cursor = None
     
     page = 1
     max_pages = 100 # 안전장치 (최대 2000명 스캔 제한)
@@ -60,9 +59,9 @@ def scan_live_streamers(conn):
     while page <= max_pages:
         url = "https://openapi.chzzk.naver.com/open/v1/lives?size=20"
         
-        # 이전 페이지에서 발급받은 커서가 있다면 URL 파라미터로 이어붙임
-        if next_concurrent_user_count and next_live_id:
-            url += f"&concurrentUserCount={next_concurrent_user_count}&liveId={next_live_id}"
+        # 이전 페이지에서 발급받은 커서 문자열이 있다면 URL에 이어붙임
+        if next_cursor:
+            url += f"&next={next_cursor}"
             
         try:
             # 무한 대기 방지를 위한 5초 제한
@@ -107,13 +106,12 @@ def scan_live_streamers(conn):
                 
         print(f"✔️ {page}페이지 수집 완료 ({len(lives)}명)")
         
-        # 다음 페이지를 위한 커서(Cursor) 추출
+        # 다음 페이지를 위한 문자열 커서(Cursor) 추출
         page_info = content.get("page", {})
-        next_info = page_info.get("next")
+        next_cursor = page_info.get("next")
         
-        if next_info:
-            next_concurrent_user_count = next_info.get("concurrentUserCount")
-            next_live_id = next_info.get("liveId")
+        # 커서 값이 정상적으로 존재하면 다음 페이지로 이동
+        if next_cursor:
             page += 1
         else:
             print(f"✅ 마지막 페이지에 도달했습니다. (종료 페이지: {page})")
