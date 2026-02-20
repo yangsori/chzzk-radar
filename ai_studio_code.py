@@ -40,32 +40,34 @@ def setup_database():
     return conn
 
 # ==========================================
-# 3. 레이더 스캔 실행 (문자열 커서 기반 전체 수집)
+# 3. 레이더 스캔 실행 (안전한 파라미터 인코딩 적용)
 # ==========================================
 def scan_live_streamers(conn):
     cursor_db = conn.cursor()
-    print("📡 전체 방송 목록 스캔을 시작합니다...")
+    print("📡 전체 방송 목록 스캔을 시작합니다 (안전한 파라미터 모드)...")
 
     new_count = 0
     update_count = 0
     current_time = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
     
-    # 다음 페이지를 열기 위한 커서 초기화
     next_cursor = None
-    
     page = 1
-    max_pages = 100 # 안전장치 (최대 2000명 스캔 제한)
+    max_pages = 100 
+    
+    # 똑같은 페이지를 맴도는 무한 루프 방지용 방문 기록
+    visited_cursors = set()
 
     while page <= max_pages:
-        url = "https://openapi.chzzk.naver.com/open/v1/lives?size=20"
+        url = "https://openapi.chzzk.naver.com/open/v1/lives"
         
-        # 이전 페이지에서 발급받은 커서 문자열이 있다면 URL에 이어붙임
+        # 파라미터를 딕셔너리로 묶어 requests에 맡김 (자동으로 완벽하게 URL 인코딩됨)
+        params = {"size": 20}
         if next_cursor:
-            url += f"&next={next_cursor}"
+            params["next"] = next_cursor
             
         try:
-            # 무한 대기 방지를 위한 5초 제한
-            response = requests.get(url, headers=headers, timeout=5)
+            # url에 직접 붙이지 않고 params 인자 사용
+            response = requests.get(url, headers=headers, params=params, timeout=5)
         except requests.exceptions.RequestException as e:
             print(f"❌ 통신 에러 (페이지 {page}): {e}")
             break
@@ -106,16 +108,18 @@ def scan_live_streamers(conn):
                 
         print(f"✔️ {page}페이지 수집 완료 ({len(lives)}명)")
         
-        # 다음 페이지를 위한 문자열 커서(Cursor) 추출
+        # 다음 페이지 커서 확인
         page_info = content.get("page", {})
         next_cursor = page_info.get("next")
         
-        # 커서 값이 정상적으로 존재하면 다음 페이지로 이동
-        if next_cursor:
-            page += 1
-        else:
-            print(f"✅ 마지막 페이지에 도달했습니다. (종료 페이지: {page})")
+        # 커서 값이 없거나, 이미 방문했던 커서를 서버가 또 줬다면 종료
+        if not next_cursor or next_cursor in visited_cursors:
+            print(f"✅ 모든 목록 수집 완료. (최종 페이지: {page})")
             break
+            
+        # 정상적인 새 커서라면 방문 기록에 남기고 다음 페이지 진행
+        visited_cursors.add(next_cursor)
+        page += 1
 
     conn.commit()
     print("-" * 50)
