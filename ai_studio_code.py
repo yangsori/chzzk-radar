@@ -23,13 +23,12 @@ headers = {
 KST = timezone(timedelta(hours=9))
 
 # ==========================================
-# 2. DB 세팅 (스마트 업데이트를 위한 컬럼 자동 추가)
+# 2. DB 세팅
 # ==========================================
 def setup_database():
     conn = sqlite3.connect("chzzk_radar.db")
     cursor = conn.cursor()
     
-    # 기본 테이블 생성
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS streamers (
             channel_id TEXT PRIMARY KEY,
@@ -40,13 +39,11 @@ def setup_database():
         )
     ''')
     
-    # 팔로워 수 컬럼 추가 (이미 있으면 무시)
     try:
         cursor.execute("ALTER TABLE streamers ADD COLUMN follower_count INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
         
-    # 마지막 팔로워 갱신 시간 컬럼 추가 (이미 있으면 무시)
     try:
         cursor.execute("ALTER TABLE streamers ADD COLUMN last_follower_updated_at TEXT")
     except sqlite3.OperationalError:
@@ -56,7 +53,7 @@ def setup_database():
     return conn
 
 # ==========================================
-# 3. 개별 채널 팔로워 수 조회 (안전한 파라미터 적용)
+# 3. 개별 채널 팔로워 수 조회 (안전한 타입 변환 적용)
 # ==========================================
 def get_follower_count(channel_id):
     url = "https://openapi.chzzk.naver.com/open/v1/channels"
@@ -67,28 +64,28 @@ def get_follower_count(channel_id):
             data = response.json()
             channels = data.get("content", {}).get("data", [])
             if channels:
-                return channels[0].get("followerCount", 0)
+                count = channels[0].get("followerCount")
+                # 값이 아예 없거나 null일 경우를 방어하고, 무조건 정수형으로 변환
+                return int(count) if count is not None else 0
     except Exception as e:
         print(f"⚠️ 팔로워 조회 에러 ({channel_id}): {e}")
-    return 0
+    # 서버 오류 시 DB 덮어쓰기를 막기 위한 안전장치
+    return None 
 
 # ==========================================
-# 4. 레이더 스캔 실행 (커서 전체 스캔 + 24시간 스마트 팔로워 갱신)
+# 4. 1단계: 생방송 레이더 (빈 데이터 필터링 적용)
 # ==========================================
 def scan_live_streamers(conn):
     cursor_db = conn.cursor()
-    print("📡 스마트 스캔을 시작합니다 (전체 방송 + 24시간 주기 팔로워 수집)...")
+    print("📡 1단계: 생방송 정밀 레이더 스캔을 시작합니다...")
 
     new_count = 0
     update_count = 0
-    follower_update_count = 0
-    
-    current_time_dt = datetime.now(KST)
-    current_time_str = current_time_dt.strftime('%Y-%m-%d %H:%M:%S')
+    current_time_str = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
     
     next_cursor = None
     page = 1
-    max_pages = 200 # 최대 4000명 수집 제한 (안전장치)
+    max_pages = 200 
     visited_cursors = set()
 
     while page <= max_pages:
@@ -99,12 +96,10 @@ def scan_live_streamers(conn):
             
         try:
             response = requests.get(url, headers=headers, params=params, timeout=5)
-        except requests.exceptions.RequestException as e:
-            print(f"❌ 통신 에러 (페이지 {page}): {e}")
+        except requests.exceptions.RequestException:
             break
 
         if response.status_code != 200:
-            print(f"❌ API 호출 에러 (페이지 {page}):", response.text)
             break
 
         data = response.json()
@@ -112,86 +107,108 @@ def scan_live_streamers(conn):
         lives = content.get("data", [])
         
         if not lives:
-            print(f"✅ 더 이상 스캔할 방송이 없습니다. (종료 페이지: {page-1})")
             break
 
         for live in lives:
             channel_id = live.get("channelId")
-            channel_name = live.get("channelName")
-            category = live.get("liveCategoryValue", "카테고리 없음")
             
-            # DB에서 이 스트리머의 마지막 팔로워 갱신 시간만 조회
-            cursor_db.execute("SELECT last_follower_updated_at FROM streamers WHERE channel_id = ?", (channel_id,))
-            row = cursor_db.fetchone()
-            
-            if row is None:
-                # [상황 1] DB에 없는 뉴페이스: 즉시 팔로워 수 수집 후 저장
-                time.sleep(0.1) 
-                follower_count = get_follower_count(channel_id)
+            # 방어막 1: 채널 ID가 없거나 null이면 DB 에러가 나므로 건너뜀
+            if not channel_id:
+                continue
                 
+            # 방어막 2: 이름이나 카테고리가 null로 올 경우 기본 문자열로 대체 (None 오염 방지)
+            channel_name = live.get("channelName") or "알 수 없는 채널"
+            category = live.get("liveCategoryValue") or "카테고리 없음"
+            
+            cursor_db.execute("SELECT * FROM streamers WHERE channel_id = ?", (channel_id,))
+            exists = cursor_db.fetchone()
+            
+            if exists is None:
                 cursor_db.execute('''
                     INSERT INTO streamers 
-                    (channel_id, channel_name, last_category, first_discovered_at, last_seen_live_at, follower_count, last_follower_updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (channel_id, channel_name, category, current_time_str, current_time_str, follower_count, current_time_str))
+                    (channel_id, channel_name, last_category, first_discovered_at, last_seen_live_at)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (channel_id, channel_name, category, current_time_str, current_time_str))
                 new_count += 1
             else:
-                last_updated_str = row[0]
-                needs_follower_update = False
-                
-                # [상황 2] 시간 계산: 업데이트된 적 없거나, 24시간이 지났는지 확인
-                if not last_updated_str:
-                    needs_follower_update = True
-                else:
-                    try:
-                        last_updated_dt = datetime.strptime(last_updated_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST)
-                        if (current_time_dt - last_updated_dt) > timedelta(hours=24):
-                            needs_follower_update = True
-                    except ValueError:
-                        needs_follower_update = True
-                
-                if needs_follower_update:
-                    # 24시간 경과됨: 팔로워 수 갱신 포함 업데이트
-                    time.sleep(0.1)
-                    follower_count = get_follower_count(channel_id)
-                    cursor_db.execute('''
-                        UPDATE streamers 
-                        SET channel_name = ?, last_category = ?, last_seen_live_at = ?, follower_count = ?, last_follower_updated_at = ?
-                        WHERE channel_id = ?
-                    ''', (channel_name, category, current_time_str, follower_count, current_time_str, channel_id))
-                    follower_update_count += 1
-                else:
-                    # 24시간 미만: 팔로워 수는 건너뛰고 기본 정보만 초고속 업데이트
-                    cursor_db.execute('''
-                        UPDATE streamers 
-                        SET channel_name = ?, last_category = ?, last_seen_live_at = ?
-                        WHERE channel_id = ?
-                    ''', (channel_name, category, current_time_str, channel_id))
-                
+                cursor_db.execute('''
+                    UPDATE streamers 
+                    SET channel_name = ?, last_category = ?, last_seen_live_at = ?
+                    WHERE channel_id = ?
+                ''', (channel_name, category, current_time_str, channel_id))
                 update_count += 1
                 
-        print(f"✔️ {page}페이지 수집 완료 ({len(lives)}명)")
-        
         page_info = content.get("page", {})
         next_cursor = page_info.get("next")
         
-        # 커서 무한 루프 검증
         if not next_cursor or next_cursor in visited_cursors:
-            print(f"✅ 모든 목록 수집 완료. (최종 페이지: {page})")
             break
             
         visited_cursors.add(next_cursor)
         page += 1
 
     conn.commit()
-    print("-" * 50)
-    print(f"🎯 완료 보고서 - 신규: {new_count}명 / 기본 업데이트: {update_count}명 / 팔로워 수 갱신: {follower_update_count}명")
+    print(f"✔️ 1단계 완료 - 신규 발견: {new_count}명 / 방송 정보 업데이트: {update_count}명")
+
+# ==========================================
+# 5. 2단계: DB 전체 팔로워 정산
+# ==========================================
+def update_all_followers_daily(conn):
+    cursor_db = conn.cursor()
+    print("📊 2단계: 전체 DB 대상 24시간 주기 팔로워 정산을 시작합니다...")
     
-    cursor_db.execute("SELECT COUNT(*) FROM streamers")
-    total_count = cursor_db.fetchone()[0]
-    print(f"📚 현재 DB 누적 스트리머 수: {total_count}명")
+    current_time_dt = datetime.now(KST)
+    current_time_str = current_time_dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    cursor_db.execute("SELECT channel_id, channel_name, last_follower_updated_at FROM streamers")
+    rows = cursor_db.fetchall()
+    
+    follower_update_count = 0
+    fail_count = 0
+    
+    for row in rows:
+        channel_id, channel_name, last_updated_str = row
+        needs_update = False
+        
+        if not last_updated_str:
+            needs_update = True
+        else:
+            try:
+                last_updated_dt = datetime.strptime(last_updated_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=KST)
+                if (current_time_dt - last_updated_dt) > timedelta(hours=24):
+                    needs_update = True
+            except ValueError:
+                needs_update = True
+                
+        if needs_update:
+            time.sleep(0.1) 
+            follower_count = get_follower_count(channel_id)
+            
+            if follower_count is not None:
+                cursor_db.execute('''
+                    UPDATE streamers 
+                    SET follower_count = ?, last_follower_updated_at = ?
+                    WHERE channel_id = ?
+                ''', (follower_count, current_time_str, channel_id))
+                follower_update_count += 1
+            else:
+                fail_count += 1
+            
+            if (follower_update_count + fail_count) % 50 == 0:
+                print(f"   ... {follower_update_count}명 갱신 완료 (통신 실패: {fail_count}명) ...")
+
+    conn.commit()
+    print(f"✔️ 2단계 완료 - 갱신 성공: {follower_update_count}명 / 갱신 지연(네트워크 오류): {fail_count}명")
 
 if __name__ == "__main__":
     db_conn = setup_database()
-    scan_live_streamers(db_conn)
+    scan_live_streamers(db_conn)      
+    update_all_followers_daily(db_conn) 
+    
+    cursor_db = db_conn.cursor()
+    cursor_db.execute("SELECT COUNT(*) FROM streamers")
+    total_count = cursor_db.fetchone()[0]
+    print("-" * 50)
+    print(f"📚 현재 DB 누적 스트리머 수: {total_count}명")
+    
     db_conn.close()
